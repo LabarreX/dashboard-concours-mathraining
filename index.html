@@ -1,0 +1,387 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Stats concours Mathraining — mis à jour</title>
+  <!-- Importation des bibliothèques nécessaires -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/hammer.js/2.0.8/hammer.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.0.1/dist/chartjs-plugin-zoom.min.js"></script>
+  <style>
+    .card { border-radius: 12px; box-shadow: 0 6px 18px rgba(0,0,0,0.08); }
+    pre { white-space: pre-wrap; }
+    th { cursor: pointer; }
+    th.sorted-asc::after { content: " ▲"; }
+    th.sorted-desc::after { content: " ▼"; }
+  </style>
+</head>
+<body class="bg-gray-50 text-gray-800 p-6">
+  <div class="max-w-6xl mx-auto">
+    <!-- En-tête du tableau de bord -->
+    <header class="mb-6">
+      <h1 class="text-3xl font-semibold">Tableau de bord — Concours Mathraining</h1>
+      <p class="text-sm text-gray-600">Affichage des données et comparaison des participants.</p>
+    </header>
+
+    <!-- Section pour entrer les URLs des profils -->
+    <section class="mb-4 card p-4 bg-white">
+      <label class="block mb-2 font-medium">URLs des profils (une par ligne)</label>
+      <textarea id="profiles" rows="6" class="w-full border rounded p-2" placeholder="Colle ici les URLs...">https://www.mathraining.be/users/20029
+https://www.mathraining.be/users/9033
+https://www.mathraining.be/users/16182
+https://www.mathraining.be/users/29521
+https://www.mathraining.be/users/17416
+https://www.mathraining.be/users/11435
+https://www.mathraining.be/users/11927
+https://www.mathraining.be/users/16561
+https://www.mathraining.be/users/16889
+https://www.mathraining.be/users/31354</textarea>
+      <div class="mt-3 flex gap-2">
+        <button id="loadBtn" class="px-4 py-2 bg-blue-600 text-white rounded">Charger les profils</button>
+        <button id="clearBtn" class="px-4 py-2 bg-gray-200 rounded">Réinitialiser</button>
+        <span id="status" class="ml-3 text-sm text-gray-600"></span>
+      </div>
+    </section>
+
+    <!-- Section pour le classement et les filtres -->
+    <section class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+      <div id="summary" class="col-span-2 card p-4 bg-white">
+        <h2 class="font-semibold mb-2">Classement et résumé</h2>
+        <div id="tableWrap"></div>
+      </div>
+      <div class="card p-4 bg-white">
+        <h2 class="font-semibold mb-2">Filtres</h2>
+        <label class="block text-sm mt-3">Type de graphe</label>
+        <select id="chartType" class="w-full border rounded p-1 mt-1">
+          <option value="line">Ligne (cumulé)</option>
+          <option value="bar">Barres (par jour)</option>
+        </select>
+      </div>
+    </section>
+
+    <!-- Section pour le graphique d'évolution des points -->
+    <section class="card p-4 bg-white mb-6">
+      <h2 class="font-semibold mb-2">Évolution des points</h2>
+      <div class="mb-2 text-sm text-gray-600">
+        💡 <strong>Zoom :</strong> Molette sur le graphique ou sur un axe • <strong>Pan :</strong> Cliquer-glisser • <strong>Reset :</strong> Double-clic ou bouton
+        <button id="resetZoomBtn" class="ml-4 px-2 py-1 bg-blue-500 text-white text-xs rounded">Reset Zoom</button>
+      </div>
+      <canvas id="timeChart" height="120"></canvas>
+    </section>
+
+    <!-- Section pour afficher les données formatées -->
+    <section class="card p-4 bg-white mb-6">
+      <details>
+        <summary class="cursor-pointer font-semibold">Voir les données complètes mises en forme</summary>
+        <pre id="raw" class="text-sm text-gray-700"></pre>
+      </details>
+    </section>
+
+    <!-- Section pour afficher les données brutes -->
+    <section class="card p-4 bg-white mb-6">
+      <details>
+        <summary class="cursor-pointer font-semibold">Voir les données brutes</summary>
+        <div id="pure_raw"></div>
+      </details>
+    </section>
+
+    <footer class="text-sm text-gray-500">Site créé avec le cœur, un ordi et un peu d'IA par Xavier LABARRE, août 2025</footer>
+  </div>
+
+<script>
+// Utilitaire pour contourner les restrictions CORS via AllOrigins
+const allOrigins = url => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`;
+
+// Récupère le contenu d'un profil avec gestion des erreurs et retries
+async function fetchProfile(url, retries = 3, delay = 500) {
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      const res = await fetch(allOrigins(url));
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const html = await res.text();
+      return { url, html };
+    } catch (e) {
+      if (attempt < retries) await new Promise(r => setTimeout(r, delay));
+      else return { url, error: e.message };
+    }
+  }
+}
+
+// Analyse le HTML pour extraire les informations du profil
+function parseProfile(html) {
+  try {
+    const doc = new DOMParser().parseFromString(html, 'text/html');
+    const bodyText = doc.body ? doc.body.innerText : html;
+
+    // Extraction du nom
+    let name = (doc.querySelector('h1')?.innerText || doc.querySelector('title')?.innerText || '')
+      .replace(/\s*\|\s*Mathraining\s*$/, '').trim() || bodyText.split('\n').map(l => l.trim()).filter(Boolean)[0] || '—';
+
+    // Extraction du score et du rang avec gestion des espaces Unicode
+    const score = Number(String(bodyText.match(/Score[\p{White_Space}]*([\d\p{White_Space}]+)/iu)?.[1] || '').replace(/\s+/g, '')) || null;
+    const rank = Number(String(bodyText.match(/Rang[\p{White_Space}]*([\d\p{White_Space}]+)/iu)?.[1] || '').replace(/\s+/g, '')) || null;
+    const centile = Number(bodyText.match(/Centile\s*([0-9\.]+)/i)?.[1] || null);
+    const exercises = Number(bodyText.match(/Exercices\s*\n\s*([0-9]+)/i)?.[1] || null);
+    const problems = Number(bodyText.match(/Problèmes\s*\n\s*([0-9]+)/i)?.[1] || null);
+
+    // Extraction des catégories
+    const categories = {};
+    ['Combinatoire', 'Géométrie', 'Théorie des nombres', 'Algèbre', 'Équations fonctionnelles', 'Inégalités'].forEach(cat => {
+      const re = new RegExp(cat + "\\s*\\n\\s*([0-9]{1,3})%", 'i');
+      const m = bodyText.match(re);
+      if (m) categories[cat] = Number(m[1]);
+    });
+
+    // Extraction des résolutions
+    const resolutions = [];
+    const regex = /\+\s*([0-9]+)\s+([0-9]{1,2}\/[0-9]{2}\/[0-9]{2})/g;
+    let match;
+    while ((match = regex.exec(bodyText))) {
+      resolutions.push({ points: Number(match[1]), date: match[2] });
+    }
+
+    return { name, score, rank, centile, exercises, problems, categories, resolutions };
+  } catch (e) {
+    return { error: e.message };
+  }
+}
+
+// Convertit une date au format JJ/MM/AA en objet Date
+function parseDateGuess(d) {
+  if (!d) return null;
+  const parts = d.split('/').map(x => Number(x));
+  if (parts.length < 3) return null;
+  let [dd, mm, yy] = parts;
+  if (yy < 100) yy += (yy < 50 ? 2000 : 1900);
+  return new Date(yy, mm - 1, dd);
+}
+
+// Prépare les données pour le graphique (cumulatif ou par jour)
+function aggregateForChart(profiles, days=30, mode="line"){
+  const end = new Date();
+  const start = new Date(); 
+  start.setDate(end.getDate() - days + 1);
+
+  const dateKeys = [];
+  for(let d=new Date(start); d<=end; d.setDate(d.getDate()+1)){
+    dateKeys.push(new Date(d));
+  }
+
+  const datasets = [];
+
+  for(const p of profiles){
+    const daily = {};
+    dateKeys.forEach(d=> daily[d.toISOString().slice(0,10)] = 0);
+
+    // Répartir les résolutions dans les jours
+    for(const r of p.resolutions || []){
+      const parsed = parseDateGuess(r.date);
+      if(!parsed) continue;
+      const key = parsed.toISOString().slice(0,10);
+      if(daily.hasOwnProperty(key)) {
+        daily[key] += (r.points || 0);
+      }
+    }
+
+    if(mode==="bar"){
+      // Barres = points gagnés par jour
+      datasets.push({
+        label: p.name||p.url,
+        data: dateKeys.map((d, i) => ({x: i, y: daily[d.toISOString().slice(0,10)] || 0}))
+      });
+    }else{
+      // Ligne = cumul des points
+      let total = p.score || 0;  
+      const data = [];
+      for(let i=dateKeys.length-1; i>=0; i--){
+        const key = dateKeys[i].toISOString().slice(0,10);
+        total -= daily[key] || 0;
+        data[i] = {x: i, y: total};
+      }
+      datasets.push({label: p.name||p.url, data});
+    }
+  }
+
+  const labels = dateKeys.map((d, i) => ({index: i, date: d.toISOString().slice(0,10)}));
+  return {labels, datasets};
+}
+
+// Rendu du graphique avec Chart.js
+let chart = null;
+async function renderChart(profiles) {
+  const days = 1400;
+  const type = document.getElementById('chartType').value;
+  const agg = aggregateForChart(profiles, days, type);
+  const ctx = document.getElementById('timeChart').getContext('2d');
+  if (chart) chart.destroy();
+
+  chart = new Chart(ctx, {
+    type,
+    data: {
+      datasets: agg.datasets.map(ds => ({
+        label: ds.label,
+        data: ds.data,
+        fill: false,
+        tension: 0,
+        borderWidth: 2,
+        pointRadius: 2
+      }))
+    },
+    options: {
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { position: 'bottom' },
+        zoom: {
+          limits: { y: { min: 0, max: 'original' } },
+          pan: { enabled: true, mode: 'xy', modifierKey: null },
+          zoom: { wheel: { enabled: true }, pinch: { enabled: true }, mode: 'xy', scaleMode: 'xy' }
+        }
+      },
+      scales: {
+        y: { beginAtZero: true },
+        x: {
+          offset: true,
+          type: 'linear',
+          position: 'bottom',
+          ticks: {
+            stepSize: 1,
+            callback: function(value) {
+              const dayIndex = Math.floor(value);
+              const end = new Date();
+              const start = new Date();
+              start.setDate(end.getDate() - days + 1);
+              const targetDate = new Date(start);
+              targetDate.setDate(start.getDate() + dayIndex);
+              return dayIndex >= 0 && dayIndex < days ? targetDate.toISOString().slice(5, 10) : '';
+            }
+          }
+        }
+      }
+    }
+  });
+}
+
+// Gestion des événements
+document.getElementById('loadBtn').addEventListener('click', async () => {
+  const urls = document.getElementById('profiles').value.split('\n').map(l => l.trim()).filter(Boolean);
+  document.getElementById('status').textContent = 'Chargement...';
+  const results = [];
+  for (const url of urls) {
+    const fetched = await fetchProfile(url);
+    const parsed = fetched.error ? { url, error: fetched.error } : { ...parseProfile(fetched.html), url };
+    results.push(parsed);
+  }
+  document.getElementById('tableWrap').innerHTML = '';
+  document.getElementById('tableWrap').appendChild(buildTable(results));
+  document.getElementById('raw').innerHTML = '';
+  document.getElementById('raw').appendChild(renderRaw(results));
+  document.getElementById('pure_raw').textContent = JSON.stringify(results, null, 2);
+  await renderChart(results);
+  document.getElementById('status').textContent = 'Terminé.';
+});
+
+document.getElementById('clearBtn').addEventListener('click', () => {
+  document.getElementById('profiles').value = '';
+  document.getElementById('tableWrap').innerHTML = '';
+  document.getElementById('raw').textContent = '';
+  if (chart) chart.destroy();
+});
+
+document.getElementById('chartType').addEventListener('change', () => {
+  try {
+    const data = JSON.parse(document.getElementById('pure_raw').textContent || '[]');
+    renderChart(data);
+  } catch (e) {}
+});
+
+document.getElementById('resetZoomBtn').addEventListener('click', () => {
+  if (chart) chart.resetZoom();
+});
+
+document.getElementById('timeChart').addEventListener('dblclick', () => {
+  if (chart) chart.resetZoom();
+});
+
+// Construit le tableau de classement
+function buildTable(data) {
+  const headers = ['Nom', 'Score', 'Rang', 'Centile', 'Exercices', 'Problèmes'];
+  const table = document.createElement('table');
+  table.className = 'w-full text-sm border-collapse';
+  const thead = document.createElement('thead');
+  const trHead = document.createElement('tr');
+  headers.forEach((h, i) => {
+    const th = document.createElement('th');
+    th.textContent = h;
+    th.className = 'p-2 text-left';
+    th.addEventListener('click', () => sortTable(table, i));
+    trHead.appendChild(th);
+  });
+  thead.appendChild(trHead);
+  table.appendChild(thead);
+  const tbody = document.createElement('tbody');
+  data.forEach(u => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td class="p-2">${u.name || u.url}</td><td class="p-2">${u.score ?? '—'}</td><td class="p-2">${u.rank ?? '—'}</td><td class="p-2">${u.centile ?? '—'}</td><td class="p-2">${u.exercises ?? '—'}</td><td class="p-2">${u.problems ?? '—'}</td>`;
+    tbody.appendChild(tr);
+  });
+  table.appendChild(tbody);
+  return table;
+}
+
+// Trie le tableau selon une colonne
+function sortTable(table, colIndex) {
+  const tbody = table.querySelector('tbody');
+  const rows = Array.from(tbody.querySelectorAll('tr'));
+  const ths = table.querySelectorAll('th');
+  let asc = !ths[colIndex].classList.contains('sorted-asc');
+  ths.forEach(th => th.classList.remove('sorted-asc', 'sorted-desc'));
+  ths[colIndex].classList.add(asc ? 'sorted-asc' : 'sorted-desc');
+  rows.sort((a, b) => {
+    let aVal = a.children[colIndex].textContent.trim();
+    let bVal = b.children[colIndex].textContent.trim();
+    const numA = parseFloat(aVal.replace(/\s+/g, ''));
+    const numB = parseFloat(bVal.replace(/\s+/g, ''));
+    if (!isNaN(numA) && !isNaN(numB)) return asc ? numA - numB : numB - numA;
+    return asc ? aVal.localeCompare(bVal) : bVal.localeCompare(aVal);
+  });
+  tbody.innerHTML = '';
+  rows.forEach(r => tbody.appendChild(r));
+}
+
+// Affiche les données formatées
+function renderRaw(data) {
+  const container = document.createElement('div');
+  data.forEach(u => {
+    const details = document.createElement('details');
+    details.className = 'mb-2 border rounded p-2';
+    const summary = document.createElement('summary');
+    summary.textContent = u.name || u.url;
+    summary.className = 'cursor-pointer font-semibold';
+    details.appendChild(summary);
+    const info = document.createElement('div');
+    info.className = 'mt-1 text-sm text-gray-600';
+    info.innerHTML = `Score: ${u.score ?? '—'} | Rang: ${u.rank ?? '—'} | Centile: ${u.centile ?? '—'} | Exercices: ${u.exercises ?? '—'}/266 | Problèmes: ${u.problems ?? '—'}/153`;
+    details.appendChild(info);
+    const resList = document.createElement('ul');
+    resList.className = 'list-disc ml-5 mt-2 text-gray-800 columns-5';
+    if (u.resolutions?.length) {
+      u.resolutions.forEach(r => {
+        const li = document.createElement('li');
+        li.textContent = `+${r.points} le ${r.date}`;
+        resList.appendChild(li);
+      });
+    } else {
+      const li = document.createElement('li');
+      li.textContent = 'Aucune résolution détectée.';
+      resList.appendChild(li);
+    }
+    details.appendChild(resList);
+    container.appendChild(details);
+  });
+  return container;
+}
+</script>
+</body>
+</html>
